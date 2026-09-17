@@ -48,6 +48,17 @@ as "out of date" after a client update, bump this value — in-game, run:
 
 and update `ForeverMouseTooltip.toc` accordingly.
 
+## A note on Forever's addon restrictions
+
+Forever inherits Midnight's addon restrictions, which block *combat
+automation* (auto target-marking, auto raid assignments, real-time
+mechanic-solving, automated WeakAuras-style responses) so player skill
+decides fights rather than addon automation. Pure UI/customization addons
+(unit frames, action bar skins, tooltip positioning, etc.) are unaffected.
+This addon only repositions the default `GameTooltip`/`ItemRefTooltip`
+frames — it reads no combat state and makes no decisions — so it falls
+in the unrestricted "customization" category.
+
 ## Status
 
 Not yet pushed anywhere — local development only for now.
