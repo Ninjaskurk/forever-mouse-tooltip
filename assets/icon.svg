@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#241a10"/>
+      <stop offset="100%" stop-color="#0e0a06"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffe38a"/>
+      <stop offset="100%" stop-color="#a5701a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="256" height="256" rx="36" fill="url(#bg)"/>
+
+  <!-- WoW-tooltip-style box -->
+  <rect x="34" y="46" width="150" height="104" rx="8"
+        fill="#0c0c0e" stroke="url(#gold)" stroke-width="4"/>
+
+  <!-- tooltip title line -->
+  <rect x="50" y="64" width="92" height="12" rx="3" fill="#ffd35c"/>
+  <!-- tooltip body lines -->
+  <rect x="50" y="86" width="118" height="8" rx="2" fill="#c9c9c9"/>
+  <rect x="50" y="102" width="100" height="8" rx="2" fill="#c9c9c9"/>
+  <rect x="50" y="118" width="70" height="8" rx="2" fill="#8fbf6b"/>
+
+  <!-- cursor arrow, anchored to the tooltip's corner -->
+  <g transform="translate(150,124)">
+    <path d="M0 0 L0 78 L18 60 L30 92 L46 85 L33 53 L58 53 Z"
+          fill="#f5f5f5" stroke="#1a1a1a" stroke-width="6" stroke-linejoin="round"/>
+  </g>
+</svg>
