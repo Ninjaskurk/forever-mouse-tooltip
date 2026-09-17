@@ -1,0 +1,6 @@
+package-as: ForeverMouseTooltip
+
+# Files that shouldn't ship inside the addon zip.
+ignore:
+  - .github
+  - .gitignore
