@@ -4,6 +4,18 @@ All notable changes to this addon are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
+
+## [0.1.2] - 2026-09-18
+### Fixed
+- **Critical**: replaced the direct `GameTooltip_SetDefaultAnchor`
+  reassignment with `hooksecurefunc`. Reassigning the global tainted it,
+  and every later caller of that global — including unrelated Blizzard
+  code such as party/raid frame health updates — inherited the taint,
+  which crashed on Forever's new "secret value" protections (health-bar
+  color comparisons in `CompactUnitFrame.lua`). `hooksecurefunc` runs
+  after Blizzard's own untainted call instead, so the global is never
+  contaminated. `/fmt off` now just makes the hook a no-op (hooks can't
+  be removed) instead of trying to restore the original function.
 ### Changed
 - Confirmed `## Interface:` version in-game: `16001` (client build
   `1.60.1.69913`), replacing the earlier best-guess value read from

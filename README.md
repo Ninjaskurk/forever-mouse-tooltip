@@ -10,8 +10,17 @@ which doesn't offer this as a built-in option.
 Blizzard's FrameXML routes almost all "default position" tooltips (action
 bars, bags, character panel, quest log, merchant frame, etc.) through a
 shared helper function, `GameTooltip_SetDefaultAnchor(tooltip, parent)`.
-This addon replaces that function with one that anchors the tooltip to
-`ANCHOR_CURSOR` instead.
+This addon uses `hooksecurefunc` to run *after* that helper and re-anchor
+the tooltip to `ANCHOR_CURSOR`.
+
+It intentionally does **not** reassign the global function directly.
+Forever taints the global itself when an addon replaces it, and every
+later caller — including unrelated Blizzard code such as party/raid frame
+updates — inherits that taint for its whole call chain, which then trips
+Forever's new "secret value" protections (e.g. health-bar color
+comparisons throwing errors). `hooksecurefunc` runs strictly after
+Blizzard's own untainted call, so the original global is never
+contaminated.
 
 Tooltips deliberately anchored elsewhere on purpose (comparison tooltips,
 contextual anchors next to a specific button, static minimap tooltips,

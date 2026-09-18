@@ -9,10 +9,20 @@
 -- quest log, merchant frame, etc). That helper normally does:
 --     tooltip:SetOwner(parent, "ANCHOR_NONE")
 --     tooltip:SetPoint("BOTTOMRIGHT", ...)
--- We replace it with a version that anchors to the cursor instead. Frames
--- that explicitly anchor tooltips elsewhere on purpose (e.g. comparison
--- tooltips, contextual anchors like ANCHOR_RIGHT/ANCHOR_TOP next to a
--- specific button, static minimap tooltips) are left alone on purpose:
+--
+-- IMPORTANT: this must be done with hooksecurefunc, not by reassigning the
+-- global. Forever (like Midnight) taints the *global function itself* when
+-- an addon replaces it, and every later caller of that global -- including
+-- unrelated Blizzard code such as party/raid frame updates -- inherits that
+-- taint for its whole call chain. Once tainted, Blizzard's "secret value"
+-- protections (e.g. health-bar color comparisons in CompactUnitFrame) throw
+-- errors because tainted code isn't trusted to read/compare them. Using
+-- hooksecurefunc instead runs our code strictly *after* Blizzard's own
+-- untainted call, so the original global is never contaminated.
+--
+-- Frames that explicitly anchor tooltips elsewhere on purpose (e.g.
+-- comparison tooltips, contextual anchors like ANCHOR_RIGHT/ANCHOR_TOP next
+-- to a specific button, static minimap tooltips) are left alone on purpose:
 -- there's no reliable way to tell "the default corner tooltip" apart from
 -- "an intentionally custom-positioned one" from the anchor type alone, so
 -- we don't try to guess and risk breaking deliberate placements.
@@ -37,32 +47,19 @@ local function GetSetting(key)
     return value
 end
 
--- Keep a reference to Blizzard's original function so it can be restored
--- (e.g. via /fmt off) or chained by another addon if needed.
-local original_SetDefaultAnchor = GameTooltip_SetDefaultAnchor
-
+-- Runs after Blizzard's own (untainted) GameTooltip_SetDefaultAnchor call
+-- and simply re-anchors to the cursor. hooksecurefunc hooks cannot be
+-- removed, so /fmt off just makes this a no-op instead of unhooking.
 local function CursorAnchor(tooltip, parent)
+    if not GetSetting("enabled") then
+        return
+    end
     tooltip:SetOwner(parent, "ANCHOR_CURSOR", GetSetting("offsetX"), GetSetting("offsetY"))
 end
 
-local function ApplyHook()
-    GameTooltip_SetDefaultAnchor = CursorAnchor
+if type(GameTooltip_SetDefaultAnchor) == "function" then
+    hooksecurefunc("GameTooltip_SetDefaultAnchor", CursorAnchor)
 end
-
-local function RemoveHook()
-    GameTooltip_SetDefaultAnchor = original_SetDefaultAnchor
-end
-
-local eventFrame = CreateFrame("Frame")
-eventFrame:RegisterEvent("ADDON_LOADED")
-eventFrame:SetScript("OnEvent", function(self, event, addonName)
-    if event == "ADDON_LOADED" and addonName == ADDON_NAME then
-        if GetSetting("enabled") then
-            ApplyHook()
-        end
-        self:UnregisterEvent("ADDON_LOADED")
-    end
-end)
 
 -- Slash command: /fmt [on|off|offset x y]
 SLASH_FOREVERMOUSETOOLTIP1 = "/fmt"
@@ -72,11 +69,9 @@ SlashCmdList["FOREVERMOUSETOOLTIP"] = function(msg)
 
     if cmd == "off" then
         ForeverMouseTooltipDB.enabled = false
-        RemoveHook()
-        print("|cff33ff99ForeverMouseTooltip|r: disabled (reload UI to fully restore default behavior).")
+        print("|cff33ff99ForeverMouseTooltip|r: disabled (tooltip stays at the default position).")
     elseif cmd == "on" then
         ForeverMouseTooltipDB.enabled = true
-        ApplyHook()
         print("|cff33ff99ForeverMouseTooltip|r: enabled, tooltip follows the cursor.")
     elseif cmd == "offset" then
         local x, y = rest:match("^(%-?%d+)%s+(%-?%d+)$")
@@ -91,3 +86,4 @@ SlashCmdList["FOREVERMOUSETOOLTIP"] = function(msg)
         print("|cff33ff99ForeverMouseTooltip|r: /fmt on | /fmt off | /fmt offset <x> <y>")
     end
 end
+
