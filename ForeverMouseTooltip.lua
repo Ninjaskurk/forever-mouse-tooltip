@@ -11,8 +11,11 @@
 --     tooltip:SetPoint("BOTTOMRIGHT", ...)
 -- We replace it with a version that anchors to the cursor instead. Frames
 -- that explicitly anchor tooltips elsewhere on purpose (e.g. comparison
--- tooltips, static minimap tooltips) are untouched because they don't call
--- this helper.
+-- tooltips, contextual anchors like ANCHOR_RIGHT/ANCHOR_TOP next to a
+-- specific button, static minimap tooltips) are left alone on purpose:
+-- there's no reliable way to tell "the default corner tooltip" apart from
+-- "an intentionally custom-positioned one" from the anchor type alone, so
+-- we don't try to guess and risk breaking deliberate placements.
 
 local ADDON_NAME, ns = ...
 
@@ -50,35 +53,6 @@ local function RemoveHook()
     GameTooltip_SetDefaultAnchor = original_SetDefaultAnchor
 end
 
--- Some UI elements (e.g. certain action button and aura tooltips) call
--- GameTooltip:SetOwner(parent, "ANCHOR_NONE") directly and then SetPoint the
--- tooltip themselves, bypassing GameTooltip_SetDefaultAnchor entirely. Catch
--- the common "default corner" pattern as a safety net without touching
--- tooltips that were deliberately anchored elsewhere (ANCHOR_CURSOR already,
--- or comparison/shopping tooltips, which pass their own frame as parent and
--- are excluded below).
-local WATCHED_ANCHORS = {
-    ANCHOR_NONE = true,
-    ANCHOR_BOTTOMRIGHT = true,
-    ANCHOR_TOPRIGHT = true,
-}
-
-local suppressReanchor = false
-
-local function OnTooltipSetOwner(self, parent, anchorType)
-    if not GetSetting("enabled") then
-        return
-    end
-    if suppressReanchor then
-        return
-    end
-    if anchorType and WATCHED_ANCHORS[anchorType] then
-        suppressReanchor = true
-        self:SetOwner(parent, "ANCHOR_CURSOR", GetSetting("offsetX"), GetSetting("offsetY"))
-        suppressReanchor = false
-    end
-end
-
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:SetScript("OnEvent", function(self, event, addonName)
@@ -86,7 +60,6 @@ eventFrame:SetScript("OnEvent", function(self, event, addonName)
         if GetSetting("enabled") then
             ApplyHook()
         end
-        hooksecurefunc(GameTooltip, "SetOwner", OnTooltipSetOwner)
         self:UnregisterEvent("ADDON_LOADED")
     end
 end)

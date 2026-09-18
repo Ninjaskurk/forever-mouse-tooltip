@@ -11,12 +11,14 @@ Blizzard's FrameXML routes almost all "default position" tooltips (action
 bars, bags, character panel, quest log, merchant frame, etc.) through a
 shared helper function, `GameTooltip_SetDefaultAnchor(tooltip, parent)`.
 This addon replaces that function with one that anchors the tooltip to
-`ANCHOR_CURSOR` instead, and adds a safety-net hook via `hooksecurefunc` on
-`GameTooltip:SetOwner` to catch any tooltip that sets an explicit
-bottom/top-right anchor directly, bypassing the shared helper.
+`ANCHOR_CURSOR` instead.
 
 Tooltips deliberately anchored elsewhere on purpose (comparison tooltips,
-shopping tooltips, static minimap tooltips, etc.) are left untouched.
+contextual anchors next to a specific button, static minimap tooltips,
+etc.) are left untouched — they don't go through the shared helper, and
+there's no reliable way to tell "the default corner tooltip" apart from an
+intentionally custom-positioned one just from the anchor type, so this
+addon doesn't try to guess.
 
 ## Install
 
