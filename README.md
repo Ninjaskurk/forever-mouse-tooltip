@@ -32,6 +32,12 @@ World of Warcraft/_classic_beta_/Interface/AddOns/ForeverMouseTooltip
 - `/fmt off` — restore Blizzard's default tooltip position.
 - `/fmt offset <x> <y>` — adjust the pixel offset from the cursor (default `12 -12`).
 
+## Icon
+
+`icon.png` (256x256, referenced via `## IconTexture` in the TOC) is shown
+next to the addon's name in the in-game AddOns list, if the client's AddOns
+UI supports the `IconTexture` field. Source SVG lives in `assets/icon.svg`.
+
 ## Notes on the `## Interface:` version
 
 The TOC `## Interface:` number (`11701`) was read directly from strings in
