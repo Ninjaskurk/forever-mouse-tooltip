@@ -42,16 +42,11 @@ UI supports the `IconTexture` field. Source SVG lives in `assets/icon.svg`.
 
 ## Notes on the `## Interface:` version
 
-The TOC `## Interface:` number (`11701`) was read directly from strings in
-the installed `WowB.exe` for this beta build. Classic-flavored clients
-change their interface number with content patches, so if the addon shows
-as "out of date" after a client update, bump this value — in-game, run:
-
-```
-/run print(select(4, GetBuildInfo()))
-```
-
-and update `ForeverMouseTooltip.toc` accordingly.
+The TOC `## Interface:` number (`16001`) was confirmed in-game via
+`/run print(select(4, GetBuildInfo()))` on client build `1.60.1.69913`.
+Classic-flavored clients bump this with content patches, so if the addon
+shows as "out of date" after a client update, re-run that command and
+update `ForeverMouseTooltip.toc` accordingly.
 
 ## A note on Forever's addon restrictions
 

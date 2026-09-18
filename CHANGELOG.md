@@ -4,6 +4,11 @@ All notable changes to this addon are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
+### Changed
+- Confirmed `## Interface:` version in-game: `16001` (client build
+  `1.60.1.69913`), replacing the earlier best-guess value read from
+  binary strings.
+
 ### Fixed
 - Removed the overly-broad `SetOwner` safety-net hook that forced
   `ANCHOR_CURSOR` on any tooltip using `ANCHOR_NONE`/`ANCHOR_BOTTOMRIGHT`/

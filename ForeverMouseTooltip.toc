@@ -1,4 +1,4 @@
-## Interface: 11701
+## Interface: 16001
 ## Title: Forever Mouse Tooltip
 ## Notes: Anchors the default game tooltip to the mouse cursor instead of the lower-right corner. Built for the WoW Forever (Classic beta, 1.60.x) client.
 ## Author: Ninjaskurk
