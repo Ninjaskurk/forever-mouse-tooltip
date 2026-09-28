@@ -5,6 +5,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-28
+### Added
+- Graphical options panel under Escape -> Options -> AddOns -> Forever
+  Mouse Tooltip (via the modern `Settings` API), with checkboxes/sliders
+  for Enable, Disable in Combat, and the X/Y cursor offset.
+- "Disable in Combat" option: keeps Blizzard's default tooltip position
+  while `InCombatLockdown()` is true instead of following the cursor.
+- `/fmt combat on|off` and `/fmt options` slash commands.
+
 ## [0.1.2] - 2026-09-18
 ### Fixed
 - **Critical**: replaced the direct `GameTooltip_SetDefaultAnchor`

@@ -42,6 +42,12 @@ World of Warcraft/_classic_beta_/Interface/AddOns/ForeverMouseTooltip
 - `/fmt on` — enable cursor-anchored tooltips (default).
 - `/fmt off` — restore Blizzard's default tooltip position.
 - `/fmt offset <x> <y>` — adjust the pixel offset from the cursor (default `12 -12`).
+- `/fmt combat on|off` — while `on`, keep Blizzard's default tooltip position during combat instead of following the cursor (default `off`).
+- `/fmt options` — open the graphical options panel (Escape -> Options -> AddOns -> Forever Mouse Tooltip). Also reachable directly from the Escape menu without the slash command.
+
+All of the above are also available as checkboxes/sliders in the options
+panel, which reads and writes the same SavedVariables the slash commands
+do.
 
 ## Icon
 

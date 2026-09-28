@@ -37,6 +37,7 @@ local DEFAULTS = {
     offsetX = 12,
     offsetY = -12,
     enabled = true,
+    disableInCombat = false,
 }
 
 local function GetSetting(key)
@@ -54,6 +55,11 @@ local function CursorAnchor(tooltip, parent)
     if not GetSetting("enabled") then
         return
     end
+    if GetSetting("disableInCombat") and InCombatLockdown() then
+        -- Leave Blizzard's own default-corner anchor (already applied by
+        -- the function we hooked) untouched while in combat.
+        return
+    end
     tooltip:SetOwner(parent, "ANCHOR_CURSOR", GetSetting("offsetX"), GetSetting("offsetY"))
 end
 
@@ -61,7 +67,60 @@ if type(GameTooltip_SetDefaultAnchor) == "function" then
     hooksecurefunc("GameTooltip_SetDefaultAnchor", CursorAnchor)
 end
 
--- Slash command: /fmt [on|off|offset x y]
+-- ================= Options panel (Escape -> Options -> AddOns) =================
+-- Uses the modern Settings API (Settings.RegisterVerticalLayoutCategory /
+-- Settings.RegisterAddOnSetting), available on this client. Guarded so the
+-- addon still loads fine (just without a graphical panel) if a future/older
+-- client build doesn't expose it -- the /fmt slash commands keep working
+-- either way.
+local optionsCategoryID
+
+local function CreateOptionsPanel()
+    if not (Settings and Settings.RegisterVerticalLayoutCategory and Settings.RegisterAddOnSetting) then
+        return
+    end
+
+    local category = Settings.RegisterVerticalLayoutCategory("Forever Mouse Tooltip")
+    Settings.RegisterAddOnCategory(category)
+    optionsCategoryID = category:GetID()
+
+    local function AddCheckbox(variable, name, tooltipText, default)
+        local setting = Settings.RegisterAddOnSetting(
+            category, ADDON_NAME .. "_" .. variable, variable,
+            ForeverMouseTooltipDB, type(default), name, default
+        )
+        Settings.CreateCheckbox(category, setting, tooltipText)
+        return setting
+    end
+
+    local function AddOffsetSlider(variable, name, tooltipText, default)
+        local setting = Settings.RegisterAddOnSetting(
+            category, ADDON_NAME .. "_" .. variable, variable,
+            ForeverMouseTooltipDB, type(default), name, default
+        )
+        local options = Settings.CreateSliderOptions(-50, 50, 1)
+        options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right)
+        Settings.CreateSlider(category, setting, options, tooltipText)
+        return setting
+    end
+
+    AddCheckbox("enabled", "Enable", "Anchor tooltips to the mouse cursor instead of the default corner.", DEFAULTS.enabled)
+    AddCheckbox("disableInCombat", "Disable in Combat", "Keep Blizzard's default tooltip position while in combat.", DEFAULTS.disableInCombat)
+    AddOffsetSlider("offsetX", "Horizontal Offset", "Pixel offset from the cursor on the X axis.", DEFAULTS.offsetX)
+    AddOffsetSlider("offsetY", "Vertical Offset", "Pixel offset from the cursor on the Y axis.", DEFAULTS.offsetY)
+end
+
+CreateOptionsPanel()
+
+local function OpenOptionsPanel()
+    if optionsCategoryID and Settings and Settings.OpenToCategory then
+        Settings.OpenToCategory(optionsCategoryID)
+    else
+        print("|cff33ff99ForeverMouseTooltip|r: options panel unavailable on this client; use /fmt on|off|offset|combat instead.")
+    end
+end
+
+-- Slash command: /fmt [on|off|offset x y|combat on|off|options]
 SLASH_FOREVERMOUSETOOLTIP1 = "/fmt"
 SlashCmdList["FOREVERMOUSETOOLTIP"] = function(msg)
     local cmd, rest = msg:match("^(%S*)%s*(.-)$")
@@ -82,8 +141,21 @@ SlashCmdList["FOREVERMOUSETOOLTIP"] = function(msg)
         else
             print("|cff33ff99ForeverMouseTooltip|r: usage /fmt offset <x> <y>")
         end
+    elseif cmd == "combat" then
+        local sub = rest:lower()
+        if sub == "on" then
+            ForeverMouseTooltipDB.disableInCombat = true
+            print("|cff33ff99ForeverMouseTooltip|r: will keep the default tooltip position while in combat.")
+        elseif sub == "off" then
+            ForeverMouseTooltipDB.disableInCombat = false
+            print("|cff33ff99ForeverMouseTooltip|r: cursor-anchored tooltip stays active in combat.")
+        else
+            print("|cff33ff99ForeverMouseTooltip|r: usage /fmt combat on|off")
+        end
+    elseif cmd == "options" then
+        OpenOptionsPanel()
     else
-        print("|cff33ff99ForeverMouseTooltip|r: /fmt on | /fmt off | /fmt offset <x> <y>")
+        print("|cff33ff99ForeverMouseTooltip|r: /fmt on | /fmt off | /fmt offset <x> <y> | /fmt combat on|off | /fmt options")
     end
 end
 
