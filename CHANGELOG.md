@@ -5,7 +5,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-28
+## [0.2.0] - 2026-10-03
 ### Added
 - Graphical options panel under Escape -> Options -> AddOns -> Forever
   Mouse Tooltip (via the modern `Settings` API), with checkboxes/sliders
@@ -13,6 +13,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - "Disable in Combat" option: keeps Blizzard's default tooltip position
   while `InCombatLockdown()` is true instead of following the cursor.
 - `/fmt combat on|off` and `/fmt options` slash commands.
+- "Pause Key" option: hold Shift/Ctrl/Alt to temporarily keep the
+  tooltip at Blizzard's default position instead of following the
+  cursor.
+- "Tooltip Anchor" option: choose Default (Blizzard's own bottom-right
+  cursor anchor, can't be offset), Bottom Left, Bottom Right, or Bottom
+  Center (calculated by halving the tooltip's own width so it's visually
+  centered under the cursor).
+- "Tooltip Scale" slider (50%-200%) to resize the tooltip.
+- "Extra Information" options: optionally add NPC ID, Item ID, Spell ID,
+  and/or Alliance/Horde faction lines to tooltips.
+### Changed
+- Positioning is now driven by `SetAnchorType` (called after Blizzard's
+  own `SetOwner`) instead of passing the offset directly to `SetOwner`.
+  This is what makes the new anchor-side options possible: offsets only
+  actually take effect for `ANCHOR_CURSOR_LEFT`/`ANCHOR_CURSOR_RIGHT` on
+  this client, not plain `ANCHOR_CURSOR` (the only anchor 0.1.x used) —
+  so the offset setting never actually did anything before now. Default
+  offset is `0, 0`.
 
 ## [0.1.2] - 2026-09-18
 ### Fixed

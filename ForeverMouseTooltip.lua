@@ -30,16 +30,23 @@
 local ADDON_NAME, ns = ...
 
 local DEFAULTS = {
-    -- Core positioning: rather than a raw pixel offset (which turned out
-    -- to be re-scaled by the tooltip's own "Tooltip Scale" setting --
-    -- SetPoint offsets are interpreted in the *child* frame's own scaled
-    -- coordinate space, not the parent's), we anchor a specific corner of
-    -- the tooltip directly to the cursor (zero offset needed) and only use
-    -- a small "gap" for breathing room, which we explicitly compensate for
-    -- the tooltip's own scale (see ApplyCursorAnchor).
-    cursorAnchorCorner = "BOTTOM_RIGHT", -- which side of the cursor the tooltip appears on
-    gapX = 16,
-    gapY = 8,
+    -- Core positioning: uses Blizzard's native ANCHOR_CURSOR_LEFT/_RIGHT
+    -- anchor types via SetOwner, which track the cursor continuously on
+    -- the engine side with zero per-frame Lua involvement. We tried a
+    -- fully custom 8-corner/edge system with manual SetPoint tracking
+    -- instead (to support more placement choices), but any per-frame
+    -- touching of GameTooltip -- even just reading it -- was found (via
+    -- testing) to interfere with its own internal fade timer, causing
+    -- unit tooltips to visibly "stick" for ~1s after the mouse left before
+    -- fading. Native cursor anchors don't have that problem since we only
+    -- call SetOwner/SetAnchorType once per tooltip show.
+    cursorAnchorSide = "DEFAULT", -- which side of the cursor the tooltip appears on
+    -- Offsets only take effect via SetAnchorType, not SetOwner's own
+    -- offset params (those are documented to be ignored for cursor anchor
+    -- types). Positive X moves right, positive Y moves up (Blizzard's own
+    -- convention) -- so a negative Y here is "below the cursor".
+    offsetX = 0,
+    offsetY = 0,
     enabled = true,
     disableInCombat = false,
 
@@ -50,22 +57,10 @@ local DEFAULTS = {
     showSpellId = false,
     showFactionName = false,
 
-    -- New: positioning refinements. Off by default.
-    disableForUnits = false,
-    disableForItems = false,
-    disableForSpells = false,
-    disableForOther = false,
     -- "NONE"/"SHIFT"/"CTRL"/"ALT" -- which modifier key (if any) pauses
     -- cursor-follow while held.
     pauseCursorModifier = "NONE",
     tooltipScale = 100, -- percent; 100 = no change from Blizzard's default size
-
-    -- New: this client keeps a unit tooltip fully visible for roughly a
-    -- second after the mouse leaves the unit before it starts fading --
-    -- confirmed (with the whole addon disabled) to be native client
-    -- behavior, not something we cause. Off by default since it's a
-    -- cosmetic workaround, not a bug fix.
-    fasterUnitFadeOut = false,
 }
 
 local function GetSetting(key)
@@ -105,170 +100,64 @@ local function ShouldFollowCursor()
     return true
 end
 
--- Which corner/edge-midpoint of the tooltip attaches to the cursor for
--- each "cursorAnchorCorner" choice, and which direction (sign) the gap
--- nudges it away from the cursor in each axis. 0 means "centered on that
--- axis" (no gap applied) for the edge-midpoint options.
-local ANCHOR_CORNERS = {
-    BOTTOM_RIGHT = { point = "TOPLEFT", signX = 1, signY = -1 },
-    BOTTOM_LEFT = { point = "TOPRIGHT", signX = -1, signY = -1 },
-    TOP_RIGHT = { point = "BOTTOMLEFT", signX = 1, signY = 1 },
-    TOP_LEFT = { point = "BOTTOMRIGHT", signX = -1, signY = 1 },
-    BELOW = { point = "TOP", signX = 0, signY = -1 },
-    ABOVE = { point = "BOTTOM", signX = 0, signY = 1 },
-    LEFT = { point = "RIGHT", signX = -1, signY = 0 },
-    RIGHT = { point = "LEFT", signX = 1, signY = 0 },
+-- Native cursor-tracking anchor types. Blizzard's engine only provides
+-- continuous (zero-lag, zero-delay) cursor tracking for these anchor
+-- types -- anything else (e.g. full 8-corner/edge placement) requires
+-- manually repositioning the tooltip ourselves every frame, which testing
+-- confirmed interferes with GameTooltip's own internal fade timer and
+-- reintroduces a ~1s "stuck" delay on unit tooltips after the mouse
+-- leaves. Trading down from freely chosen corners/edges to these choices
+-- is the price for keeping that native, delay-free tracking.
+--
+-- "CENTER" isn't a real Blizzard anchor type -- offsets were found (by
+-- testing) to only actually take effect for ANCHOR_CURSOR_LEFT/_RIGHT, not
+-- plain ANCHOR_CURSOR, on this client. We fake horizontal centering by
+-- using ANCHOR_CURSOR_RIGHT (whose left edge anchors at the cursor) and
+-- shifting it left by half the tooltip's own width -- see ApplyCursorAnchor.
+local ANCHOR_TYPES = {
+    DEFAULT = "ANCHOR_CURSOR", -- Blizzard's own default cursor anchor (bottom-right of cursor)
+    RIGHT = "ANCHOR_CURSOR_RIGHT", -- tooltip appears to the right of the cursor
+    LEFT = "ANCHOR_CURSOR_LEFT", -- tooltip appears to the left of the cursor
+    CENTER = "ANCHOR_CURSOR_RIGHT", -- see comment above; offset is adjusted below
 }
 
--- A tiny invisible frame that tracks the cursor on its own OnUpdate,
--- independent of GameTooltip entirely. We anchor GameTooltip to *this*
--- frame instead of computing/re-setting GameTooltip's own anchor every
--- frame: GameTooltip is a large, complex frame with its own internal
--- layout/fade/taint-sensitive logic, and repeatedly calling
--- ClearAllPoints/SetPoint/SetClampedToScreen on it 60 times a second was
--- both causing the unit-tooltip fade-out delay (constantly touching it
--- while it was trying to fade away) and fighting with whatever Blizzard
--- does internally when the tooltip's own scale changes (making the
--- anchor visibly "jump" as the Tooltip Scale slider moved). Anchoring to
--- a moving reference frame means we only need to set GameTooltip's point
--- once per show -- it then tracks the cursor for free as this frame moves,
--- with zero further touches to GameTooltip itself.
-local cursorAnchor = CreateFrame("Frame", "ForeverMouseTooltipCursorAnchor", UIParent)
-cursorAnchor:SetSize(1, 1)
-
--- State for the optional "Instant Unit Tooltip Fade" setting below. This
--- works around what turned out to be native client behavior (confirmed by
--- testing with the whole addon disabled): a unit tooltip stays fully
--- visible for roughly a second after the mouse leaves the unit before it
--- starts fading, likely because Blizzard's own periodic health/power
--- refresh keeps re-showing it. We can't call tooltip:Hide() ourselves to
--- work around this (see the taint warning above HandleUnitTooltip et al)
--- -- but SetAlpha is a plain cosmetic property, runs no script, and isn't
--- one of the calls known to taint the tooltip, so we snap it invisible
--- ourselves the instant the mouse is no longer over any unit, independent
--- of whatever timer Blizzard is using internally.
-local fasterFadeActive = false
-
--- tooltip:GetUnit() was found (via /fmt debug) to go nil again shortly
--- after the mouse leaves the unit -- even though the tooltip itself keeps
--- showing the same content -- so using it to decide "is this still a unit
--- tooltip" flip-flopped: we'd force alpha to 0, then immediately see
--- hasUnit=false next tick, reset alpha back to 1 via ResetFasterFadeState,
--- and let Blizzard's own ~1s fade restart from full visibility, which
--- looked identical to the delay we were trying to remove. Tracking content
--- type ourselves (set in HandleUnitTooltip/Item/Spell, cleared only on
--- OnTooltipCleared below) is stable for the whole life of the tooltip.
-local currentTooltipIsUnit = false
-
-local function ResetFasterFadeState()
-    if fasterFadeActive then
-        fasterFadeActive = false
-        GameTooltip:SetAlpha(1)
-    end
-end
-
--- Diagnosed via /fmt debug: Blizzard's own OnUpdate script on GameTooltip
--- (not anything we registered) was overwriting our SetAlpha(0) every frame
--- with its own slowly-decaying alpha, since our cursorAnchor frame and
--- GameTooltip are different frames with no guaranteed OnUpdate ordering --
--- our forced value kept losing the race, producing the same gradual fade
--- as before instead of an instant cut. HookScript (as opposed to a plain
--- OnUpdate on our own frame) runs our handler *after* GameTooltip's own
--- existing OnUpdate script every tick, guaranteeing we get the final say.
-local ok = pcall(GameTooltip.HookScript, GameTooltip, "OnUpdate", function(self)
-    if GetSetting("fasterUnitFadeOut") and self:IsShown() then
-        if currentTooltipIsUnit and not UnitExists("mouseover") then
-            fasterFadeActive = true
-            self:SetAlpha(0)
-        else
-            ResetFasterFadeState()
-        end
-    else
-        ResetFasterFadeState()
-    end
-end)
-if not ok then
-    -- This client doesn't support hooking GameTooltip's OnUpdate this way;
-    -- the "Instant Unit Tooltip Fade" option will simply have no effect.
-end
-
--- Diagnostic only (toggled via /fmt debug): logs the moment each of these
--- signals changes, with a timestamp, so we can tell apart "mouseover unit
--- token clears late" (an engine/raycast limitation we can't work around)
--- from "mouseover clears promptly but the tooltip itself still lingers"
--- (something we might still be able to influence).
-local debugWatchEnabled = false
-local lastDebugMouseover, lastDebugShown, lastDebugAlpha
-
-cursorAnchor:SetScript("OnUpdate", function(self)
-    if debugWatchEnabled then
-        local mouseoverNow = UnitExists("mouseover") and true or false
-        if mouseoverNow ~= lastDebugMouseover then
-            lastDebugMouseover = mouseoverNow
-            print(("|cff33ff99FMT debug|r t=%.2f mouseover=%s"):format(GetTime(), tostring(mouseoverNow)))
-        end
-        local shownNow = GameTooltip:IsShown() and true or false
-        if shownNow ~= lastDebugShown then
-            lastDebugShown = shownNow
-            print(("|cff33ff99FMT debug|r t=%.2f tooltipShown=%s"):format(GetTime(), tostring(shownNow)))
-        end
-        local alphaNow = GameTooltip:GetAlpha()
-        if not lastDebugAlpha or math.abs(alphaNow - lastDebugAlpha) > 0.05 then
-            lastDebugAlpha = alphaNow
-            print(("|cff33ff99FMT debug|r t=%.2f tooltipAlpha=%.2f"):format(GetTime(), alphaNow))
-        end
-    end
-
-    if not ShouldFollowCursor() then
-        return
-    end
-    local x, y
-    if GetScaledCursorPosition then
-        -- Prefer this over GetCursorPosition()/effective-scale division:
-        -- it returns the cursor position already converted to UIParent's
-        -- coordinate space, which sidesteps a scale-conversion bug on this
-        -- client that was confining the tooltip to a small area near the
-        -- top-left corner regardless of real cursor position.
-        x, y = GetScaledCursorPosition()
-    else
-        local scale = UIParent:GetEffectiveScale()
-        if not scale or scale == 0 then
-            scale = 1
-        end
-        x, y = GetCursorPosition()
-        x, y = x / scale, y / scale
-    end
-    self:ClearAllPoints()
-    self:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", x, y)
-end)
-
--- IMPORTANT: never call tooltip:SetOwner(...)/Show()/Hide()/ClearLines()
--- from our own code on this client -- SetOwner clears the tooltip and runs
--- Blizzard's OnTooltipCleared script *as addon code*, which taints the
--- tooltip (and a tainted tooltip on this client can silently fail to
--- display "secret" combat-related lines). ClearAllPoints/SetPoint run no
--- script at all, so they're safe.
---
--- We also don't use SetAnchorType("ANCHOR_CURSOR_LEFT"/"_RIGHT", x, y)
--- here even though it's documented to respect offsets: on this specific
--- client build it doesn't -- horizontally it only respects the *sign* of x
--- (snapping hard left/right regardless of magnitude) and vertically it
--- behaves inconsistently at larger values.
---
--- Called once per tooltip show (and again if/when the content type turns
--- out to be a unit/item/spell -- see UpdateTooltipPosition), NOT every
--- frame: continuous tracking now comes for free from cursorAnchor's own
--- OnUpdate above.
+-- By the time any of our hooks run, Blizzard's own code has *always*
+-- already called tooltip:SetOwner(...) -- either inside
+-- GameTooltip_SetDefaultAnchor itself (for the "default corner" case: bags,
+-- action bars, etc.) or natively for world-unit mouseover tooltips (which
+-- bypass GameTooltip_SetDefaultAnchor entirely and call SetOwner directly,
+-- which is also why switching mouseover from one unit straight to another
+-- doesn't necessarily re-trigger our GameTooltip_SetDefaultAnchor hook).
+-- That means we never need to call tooltip:SetOwner(...) ourselves at
+-- all: SetAnchorType alone can change the anchor type and offset on an
+-- already-owned tooltip, with no content-clearing side effect (unlike
+-- SetOwner, which is effectively a hide/show cycle and was wiping out
+-- Blizzard's own name/health/level lines whenever we called it a second
+-- time from Handle*Tooltip to refine positioning after content was
+-- added). This also fixes a related bug where switching mouseover
+-- directly from one unit to another (e.g. NPC to player, with no gap in
+-- between) could leave the tooltip "stuck" on the previous anchor,
+-- because GameTooltip_SetDefaultAnchor -- our only previous trigger for
+-- calling SetOwner -- doesn't reliably re-fire for that transition.
+-- Calling SetAnchorType unconditionally every time, regardless of
+-- whether anything changed, means there's no stale state to get stuck in.
 local function ApplyCursorAnchor(tooltip)
-    local corner = ANCHOR_CORNERS[GetSetting("cursorAnchorCorner")] or ANCHOR_CORNERS.BOTTOM_RIGHT
-    local gapX = GetSetting("gapX") or 0
-    local gapY = GetSetting("gapY") or 0
+    local side = GetSetting("cursorAnchorSide")
+    local anchorType = ANCHOR_TYPES[side] or ANCHOR_TYPES.DEFAULT
+    local offsetX = GetSetting("offsetX") or 0
+    local offsetY = GetSetting("offsetY") or 0
 
-    tooltip:ClearAllPoints()
-    if tooltip.SetClampedToScreen then
-        tooltip:SetClampedToScreen(false)
+    if side == "CENTER" then
+        -- tooltip:GetWidth() is a plain read, not a risky call -- safe to
+        -- use here. On the very first (tentative) call, before content is
+        -- set, this may reflect a stale size from a previous tooltip; it
+        -- gets corrected once Handle*Tooltip re-applies this after the
+        -- real content (and width) is known.
+        local width = tooltip:GetWidth() or 0
+        offsetX = offsetX - (width / 2)
     end
-    tooltip:SetPoint(corner.point, cursorAnchor, "BOTTOMLEFT", corner.signX * gapX, corner.signY * gapY)
+
+    tooltip:SetAnchorType(anchorType, offsetX, offsetY)
 end
 
 local lastAppliedScale
@@ -286,38 +175,9 @@ local function ApplyScale(tooltip)
     end
 end
 
--- Which "disableForX" setting applies to a tooltip, determined fresh each
--- time from its actual current content via the compat accessors
--- (GetUnit/GetItem/GetSpell) rather than relying on which hook delivered
--- it. At GameTooltip_SetDefaultAnchor time (before content is attached)
--- these all correctly report nothing set yet, so this naturally falls
--- through to "disableForOther" as a tentative guess; the Handle*Tooltip
--- callbacks below call this again once content is known, correcting it.
-local function GetDisableSettingForTooltip(tooltip)
-    if tooltip.GetUnit then
-        local _, unit = tooltip:GetUnit()
-        if unit then
-            return "disableForUnits"
-        end
-    end
-    if tooltip.GetItem then
-        local _, link = tooltip:GetItem()
-        if link then
-            return "disableForItems"
-        end
-    end
-    if tooltip.GetSpell then
-        local ok, name = pcall(tooltip.GetSpell, tooltip)
-        if ok and name then
-            return "disableForSpells"
-        end
-    end
-    return "disableForOther"
-end
-
--- Whether *we* (not Blizzard's own default) currently own this tooltip's
--- anchor, so RevertToDefaultAnchor knows whether there's anything to
--- undo. Reset on OnTooltipCleared (see below).
+-- Tracks whether we last positioned this tooltip via the cursor anchor (as
+-- opposed to Blizzard's own default), so RevertToDefaultAnchor knows
+-- whether there's anything to actually undo. Reset on OnTooltipCleared.
 local positionedByUs = false
 local suppressDefaultAnchorHook = false
 
@@ -328,17 +188,21 @@ local function RevertToDefaultAnchor(tooltip)
     -- GameTooltip_SetDefaultAnchor is hooked via hooksecurefunc, so calling
     -- it ourselves would normally re-trigger OnDefaultAnchor below;
     -- suppress that one reentrant call so we don't immediately undo our
-    -- own revert.
+    -- own revert. This is the one remaining case that still calls
+    -- GameTooltip_SetDefaultAnchor (and therefore SetOwner) -- deliberately
+    -- rare, since it only runs while paused (combat or the pause key held).
     suppressDefaultAnchorHook = true
     GameTooltip_SetDefaultAnchor(tooltip, tooltip:GetOwner())
     suppressDefaultAnchorHook = false
     positionedByUs = false
 end
 
--- Repositions (or reverts) the tooltip based on current settings and
--- content type. Only handles positioning -- scale is applied separately.
+-- Repositions (or reverts) the tooltip based on current settings. Only
+-- handles positioning -- scale is applied separately. Safe to call every
+-- time (OnDefaultAnchor's tentative guess AND Handle*Tooltip's content-
+-- aware correction) since ApplyCursorAnchor never touches SetOwner.
 local function UpdateTooltipPosition(tooltip)
-    if not ShouldFollowCursor() or GetSetting(GetDisableSettingForTooltip(tooltip)) then
+    if not ShouldFollowCursor() then
         RevertToDefaultAnchor(tooltip)
         return
     end
@@ -382,6 +246,24 @@ local function RegisterTooltipHook(scriptType, handler)
     end
 end
 
+-- "CENTER" mode's offset depends on the tooltip's own width, which isn't
+-- final yet when OnDefaultAnchor applies its first, tentative placement
+-- (GameTooltip_SetDefaultAnchor fires before content is set). For unit/
+-- item/spell tooltips, Handle*Tooltip above re-applies positioning once
+-- content is known, correcting the offset. But plenty of tooltips never go
+-- through those handlers (e.g. mailbox, auction house, bag slots without
+-- an item, generic SetText tooltips) -- for those, the offset was staying
+-- stuck at whatever the *previous* tooltip's width happened to be, which
+-- could shove a small tooltip far off to one side if the prior tooltip was
+-- large. OnSizeChanged fires whenever the tooltip's actual width changes
+-- (not continuously, so no fade-delay risk) and lets us correct the CENTER
+-- offset for every tooltip type uniformly.
+RegisterTooltipHook("OnSizeChanged", function(self)
+    if GetSetting("cursorAnchorSide") == "CENTER" and positionedByUs then
+        ApplyCursorAnchor(self)
+    end
+end)
+
 local function GetNpcIdFromGUID(guid)
     if not guid then
         return nil
@@ -400,18 +282,16 @@ end
 -- visible tooltip resizes it on its own, and calling Show() ourselves is
 -- one of the operations that can taint the tooltip on this client.
 -- Positioning is handled separately by UpdateTooltipPosition (via
--- GameTooltip_SetDefaultAnchor and OnUpdate), so these handlers only deal
--- with the extra info lines.
+-- GameTooltip_SetDefaultAnchor and OnSizeChanged), so these handlers only
+-- deal with the extra info lines.
 --
 -- Blizzard periodically re-fires this postcall for the *same* unit tooltip
 -- while it's still shown (to keep the health/power values it displays
 -- live), not just once per mouseover. Without dedup, that meant we kept
 -- calling AddLine again and again for the same unit, endlessly growing and
--- re-laying-out the tooltip -- which is what was causing the visible
--- "delay"/stutter specifically while hovering over units (most noticeable
--- on players, whose health ticks more often). lastInfoKey tracks what we
--- last added info lines for; it's reset on OnTooltipCleared so a genuinely
--- new mouseover (even over the same unit again later) still gets them.
+-- re-laying-out the tooltip. lastInfoKey tracks what we last added info
+-- lines for; it's reset on OnTooltipCleared so a genuinely new mouseover
+-- (even over the same unit again later) still gets them.
 local lastInfoKey
 
 local function HandleUnitTooltip(tooltip, unit, guid)
@@ -419,13 +299,11 @@ local function HandleUnitTooltip(tooltip, unit, guid)
     if key == lastInfoKey then
         -- Same unit as last refresh (Blizzard re-fires this postcall
         -- repeatedly to keep health/power live, not just on genuine
-        -- mouseover) -- skip repositioning too, not just the AddLine
-        -- calls below, so we don't keep touching GameTooltip while it
-        -- may be trying to fade out.
+        -- mouseover) -- skip the repositioning re-check too, not just the
+        -- AddLine calls below, since there's nothing new to correct.
         return
     end
     lastInfoKey = key
-    currentTooltipIsUnit = true
 
     -- Re-confirms/corrects the tentative "other" guess from OnDefaultAnchor
     -- now that we know this is really a unit tooltip. Only runs once per
@@ -454,7 +332,6 @@ local function HandleItemTooltip(tooltip, itemId)
         return
     end
     lastInfoKey = key
-    currentTooltipIsUnit = false
 
     UpdateTooltipPosition(tooltip)
 
@@ -469,7 +346,6 @@ local function HandleSpellTooltip(tooltip, spellId)
         return
     end
     lastInfoKey = key
-    currentTooltipIsUnit = false
 
     UpdateTooltipPosition(tooltip)
 
@@ -481,7 +357,6 @@ end
 RegisterTooltipHook("OnTooltipCleared", function()
     lastInfoKey = nil
     positionedByUs = false
-    currentTooltipIsUnit = false
 end)
 
 if USE_TOOLTIP_DATA_PROCESSOR then
@@ -552,12 +427,13 @@ else
     end)
 end
 
--- Continuous cursor-following now comes for free from cursorAnchor's own
--- OnUpdate (see above) moving the frame GameTooltip is anchored to -- we
--- deliberately don't hook GameTooltip's own OnUpdate to re-position it
--- directly anymore; doing that at 60fps on GameTooltip itself (a large,
--- complex frame with its own fade/layout logic) was causing a fade-out
--- delay on unit tooltips and fighting with scale changes.
+-- Continuous cursor-following comes for free from Blizzard's native
+-- ANCHOR_CURSOR_LEFT/_RIGHT anchor types (set once per show in
+-- ApplyCursorAnchor above) -- the engine moves the tooltip with the mouse
+-- on its own, with no OnUpdate hook or per-frame repositioning needed at
+-- all. Earlier attempts to support free-form corner/edge placement via
+-- manual SetPoint on every frame caused a fade-out delay on unit tooltips
+-- and fought with scale changes; this native approach has neither problem.
 
 -- ================= Options panel (Escape -> Options -> AddOns) =================
 -- Uses the modern Settings API (Settings.RegisterVerticalLayoutCategory /
@@ -624,29 +500,20 @@ local function CreateOptionsPanel()
     AddHeader("Positioning")
     AddCheckbox("enabled", "Enable", "Anchor tooltips to the mouse cursor instead of the default corner.", DEFAULTS.enabled)
     AddCheckbox("disableInCombat", "Disable in Combat", "Keep Blizzard's default tooltip position while in combat.", DEFAULTS.disableInCombat)
-    AddDropdown("pauseCursorModifier", "Pause Cursor-Follow While Holding", "Hold this key to temporarily keep the tooltip at Blizzard's default position instead of following the cursor.", DEFAULTS.pauseCursorModifier, {
+    AddDropdown("pauseCursorModifier", "Pause Key", "Hold this key to temporarily keep the tooltip at Blizzard's default position instead of following the cursor.", DEFAULTS.pauseCursorModifier, {
         { value = "NONE", text = "None (always follow cursor)" },
         { value = "SHIFT", text = "Shift" },
         { value = "CTRL", text = "Ctrl" },
         { value = "ALT", text = "Alt" },
     })
-    AddCheckbox("disableForUnits", "Don't Reposition Unit Tooltips", "Leave unit (player/NPC) tooltips at the default position instead of following the cursor.", DEFAULTS.disableForUnits)
-    AddCheckbox("disableForItems", "Don't Reposition Item Tooltips", "Leave item tooltips at the default position instead of following the cursor.", DEFAULTS.disableForItems)
-    AddCheckbox("disableForSpells", "Don't Reposition Spell Tooltips", "Leave spell/ability tooltips at the default position instead of following the cursor.", DEFAULTS.disableForSpells)
-    AddCheckbox("disableForOther", "Don't Reposition Other Tooltips", "Leave all other tooltips (action bars, currency, quests, etc.) at the default position instead of following the cursor.", DEFAULTS.disableForOther)
-    AddCheckbox("fasterUnitFadeOut", "Instant Unit Tooltip Fade", "Hide unit tooltips immediately after the mouse leaves, instead of the client's native ~1 second lingering delay.", DEFAULTS.fasterUnitFadeOut)
-    AddDropdown("cursorAnchorCorner", "Tooltip Appears", "Which side of the cursor the tooltip appears on.", DEFAULTS.cursorAnchorCorner, {
-        { value = "BOTTOM_RIGHT", text = "Below and to the right" },
-        { value = "BOTTOM_LEFT", text = "Below and to the left" },
-        { value = "TOP_RIGHT", text = "Above and to the right" },
-        { value = "TOP_LEFT", text = "Above and to the left" },
-        { value = "BELOW", text = "Directly below (centered)" },
-        { value = "ABOVE", text = "Directly above (centered)" },
-        { value = "LEFT", text = "Directly left (centered)" },
-        { value = "RIGHT", text = "Directly right (centered)" },
+    AddDropdown("cursorAnchorSide", "Tooltip Anchor", "Which side of the cursor the tooltip appears on.", DEFAULTS.cursorAnchorSide, {
+        { value = "DEFAULT", text = "Default (Can't be offset)" },
+        { value = "RIGHT", text = "Bottom Right" },
+        { value = "LEFT", text = "Bottom Left" },
+        { value = "CENTER", text = "Bottom Center" },
     })
-    AddSlider("gapX", "Horizontal Gap", "Extra breathing room between the cursor and the tooltip, in screen pixels.", DEFAULTS.gapX, 0, 50, 1)
-    AddSlider("gapY", "Vertical Gap", "Extra breathing room between the cursor and the tooltip, in screen pixels.", DEFAULTS.gapY, 0, 50, 1)
+    AddSlider("offsetX", "Horizontal Offset", "Extra breathing room between the cursor and the tooltip. Positive moves right, negative moves left.", DEFAULTS.offsetX, -50, 50, 1)
+    AddSlider("offsetY", "Vertical Offset", "Extra breathing room between the cursor and the tooltip. Positive moves up, negative moves down.", DEFAULTS.offsetY, -50, 50, 1)
     local scaleSetting = AddSlider("tooltipScale", "Tooltip Scale (%)", "Resize the tooltip. 100 = default size.", DEFAULTS.tooltipScale, 50, 200, 5)
     scaleSetting:SetValueChangedCallback(function()
         -- Apply immediately (event-driven) rather than waiting for the
@@ -706,15 +573,15 @@ SlashCmdList["FOREVERMOUSETOOLTIP"] = function(msg)
     elseif cmd == "on" then
         ForeverMouseTooltipDB.enabled = true
         print("|cff33ff99ForeverMouseTooltip|r: enabled, tooltip follows the cursor.")
-    elseif cmd == "gap" then
-        local x, y = rest:match("^(%d+)%s+(%d+)$")
+    elseif cmd == "offset" then
+        local x, y = rest:match("^(%-?%d+)%s+(%-?%d+)$")
         if x and y then
             x, y = tonumber(x), tonumber(y)
-            ForeverMouseTooltipDB.gapX = x
-            ForeverMouseTooltipDB.gapY = y
-            print(("|cff33ff99ForeverMouseTooltip|r: gap set to %d, %d."):format(x, y))
+            ForeverMouseTooltipDB.offsetX = x
+            ForeverMouseTooltipDB.offsetY = y
+            print(("|cff33ff99ForeverMouseTooltip|r: offset set to %d, %d."):format(x, y))
         else
-            print("|cff33ff99ForeverMouseTooltip|r: usage /fmt gap <x> <y> (non-negative pixels; which side of the cursor is set in the options panel)")
+            print("|cff33ff99ForeverMouseTooltip|r: usage /fmt offset <x> <y> (pixels; positive x = right, positive y = up)")
         end
     elseif cmd == "combat" then
         local sub = rest:lower()
@@ -729,12 +596,8 @@ SlashCmdList["FOREVERMOUSETOOLTIP"] = function(msg)
         end
     elseif cmd == "options" then
         OpenOptionsPanel()
-    elseif cmd == "debug" then
-        debugWatchEnabled = not debugWatchEnabled
-        lastDebugMouseover, lastDebugShown, lastDebugAlpha = nil, nil, nil
-        print("|cff33ff99ForeverMouseTooltip|r: debug watch " .. (debugWatchEnabled and "ON" or "OFF") .. " (logs mouseover/tooltip-shown/alpha transitions to chat).")
     else
-        print("|cff33ff99ForeverMouseTooltip|r: /fmt on | /fmt off | /fmt gap <x> <y> | /fmt combat on|off | /fmt options | /fmt debug")
+        print("|cff33ff99ForeverMouseTooltip|r: /fmt on | /fmt off | /fmt offset <x> <y> | /fmt combat on|off | /fmt options")
     end
 end
 
