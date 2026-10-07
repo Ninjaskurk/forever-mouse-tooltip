@@ -20,6 +20,10 @@
 -- hooksecurefunc instead runs our code strictly *after* Blizzard's own
 -- untainted call, so the original global is never contaminated.
 --
+-- World tooltips (mobs, players, objects) follow the cursor. HUD tooltips
+-- (action bars, unit frames, buffs...) can instead be anchored next to the
+-- hovered element -- see "HUD element anchoring" below.
+--
 -- Frames that explicitly anchor tooltips elsewhere on purpose (e.g.
 -- comparison tooltips, contextual anchors like ANCHOR_RIGHT/ANCHOR_TOP next
 -- to a specific button, static minimap tooltips) are left alone on purpose:
@@ -61,6 +65,11 @@ local DEFAULTS = {
     -- cursor-follow while held.
     pauseCursorModifier = "NONE",
     tooltipScale = 100, -- percent; 100 = no change from Blizzard's default size
+
+    -- Where HUD (non-world) tooltips go: "ELEMENT" = next to the hovered
+    -- element, "CURSOR" = follow the cursor, "DEFAULT" = Blizzard's position.
+    hudAnchorMode = "ELEMENT",
+    debugMode = false, -- adds a placement debug line to every tooltip
 }
 
 local function GetSetting(key)
@@ -72,6 +81,21 @@ local function GetSetting(key)
         return DEFAULTS[key]
     end
     return value
+end
+
+-- /fmt debug (or the "Show Placement Debug" option): placement paths record
+-- what they did and AddDebugLine shows it in the tooltip. debugEnabled is a
+-- local mirror of the debugMode setting, kept in sync by SyncDebugEnabled.
+local debugEnabled = false
+local debugOwner, debugText
+local debugSkipped = 0
+
+local function GetFrameLabel(obj)
+    return obj and obj.GetDebugName and obj:GetDebugName() or tostring(obj)
+end
+
+local function RecordPlacement(owner, text)
+    debugOwner, debugText = owner, text
 end
 
 local INFO_LINE_COLOR = { 0.6, 0.6, 0.6 }
@@ -158,6 +182,10 @@ local function ApplyCursorAnchor(tooltip)
     end
 
     tooltip:SetAnchorType(anchorType, offsetX, offsetY)
+    if debugEnabled then
+        RecordPlacement(tooltip:GetOwner(), ("cursor: %s, offset %.0f,%.0f"):format(
+            anchorType, offsetX, offsetY))
+    end
 end
 
 local lastAppliedScale
@@ -173,6 +201,222 @@ local function ApplyScale(tooltip)
         tooltip:SetScale(scale)
         lastAppliedScale = scale
     end
+end
+
+-- ================= HUD element anchoring =================
+-- World tooltips (mobs, players, NPCs, mailboxes, signposts...) are owned
+-- by UIParent/WorldFrame. Anything else is a UI element (action button,
+-- unit frame, buff, ...), and in "ELEMENT" mode its tooltip is placed next
+-- to the element, on the side facing the middle of the screen, like
+-- Blizzard's default bag tooltips.
+local function IsWorldOwner(owner)
+    return owner == nil or owner == UIParent or owner == WorldFrame
+end
+
+-- Unit frames are much bigger than their visible art, so anchoring to the
+-- frame's corners leaves the tooltip floating in empty space. Instead we
+-- measure the visible textures (recursing into visible children), clamp
+-- that to the frame's own rectangle, and anchor there. Measurements are in
+-- screen units (edge * effective scale) so differently scaled children
+-- combine correctly.
+--
+-- Health-bar fills and health text are secret values on this client, and
+-- doing math on a secret value from addon code throws. So FontStrings are
+-- ignored, StatusBars are measured by their own frame (never their fill),
+-- and each object is measured inside its own pcall so one protected region
+-- is skipped instead of failing the whole scan.
+local MAX_ART_DEPTH = 5
+local MAX_ART_REGIONS = 300
+-- Blizzard re-anchors hovered unit frames and action buttons every ~0.2s,
+-- so the result is cached per owner and rescanned at most this often.
+local ELEMENT_CACHE_SECONDS = 1
+
+local IsSecret = issecretvalue or function() return false end
+
+local boundsL, boundsR, boundsT, boundsB
+local scannedRegions
+
+local function MeasureObject(obj)
+    local l, r, t, b = obj:GetLeft(), obj:GetRight(), obj:GetTop(), obj:GetBottom()
+    if IsSecret(l) or IsSecret(r) or IsSecret(t) or IsSecret(b) then
+        return nil
+    end
+    if not (l and r and t and b) or r - l < 1 or t - b < 1 then
+        return nil
+    end
+    local s = obj:GetEffectiveScale()
+    if IsSecret(s) then
+        return nil
+    end
+    return l * s, r * s, t * s, b * s
+end
+
+local function ExtendBounds(obj)
+    local ok, l, r, t, b = pcall(MeasureObject, obj)
+    if not ok then
+        debugSkipped = debugSkipped + 1
+        return
+    end
+    if not l then
+        return
+    end
+    if not boundsL or l < boundsL then boundsL = l end
+    if not boundsR or r > boundsR then boundsR = r end
+    if not boundsT or t > boundsT then boundsT = t end
+    if not boundsB or b < boundsB then boundsB = b end
+end
+
+local function IsShownWithAlpha(obj)
+    local visible, alpha = obj:IsVisible(), obj:GetAlpha()
+    if IsSecret(visible) or IsSecret(alpha) then
+        return false
+    end
+    return visible and alpha > 0
+end
+
+local function IsVisibleTexture(region)
+    return region:GetObjectType() == "Texture" and IsShownWithAlpha(region)
+end
+
+local function IsStatusBar(frame)
+    return frame:GetObjectType() == "StatusBar"
+end
+
+local function CollectArtBounds(frame, depth)
+    local regions = { frame:GetRegions() }
+    for i = 1, #regions do
+        scannedRegions = scannedRegions + 1
+        if scannedRegions > MAX_ART_REGIONS then
+            return
+        end
+        local ok, isArt = pcall(IsVisibleTexture, regions[i])
+        if ok and isArt then
+            ExtendBounds(regions[i])
+        end
+    end
+    if depth >= MAX_ART_DEPTH then
+        return
+    end
+    local children = { frame:GetChildren() }
+    for i = 1, #children do
+        local child = children[i]
+        local ok, shown = pcall(IsShownWithAlpha, child)
+        if ok and shown then
+            local okType, isBar = pcall(IsStatusBar, child)
+            if okType and isBar then
+                ExtendBounds(child)
+            elseif okType then
+                CollectArtBounds(child, depth + 1)
+            end
+        end
+    end
+end
+
+-- Returns l, r, t, b (screen units) and a label for /fmt debug: the visible
+-- art clamped to the owner's rectangle, or the owner's rectangle if the art
+-- can't be measured. nil if neither can be.
+local function GetElementBounds(owner)
+    boundsL, boundsR, boundsT, boundsB = nil, nil, nil, nil
+    ExtendBounds(owner)
+    local fl, fr, ft, fb = boundsL, boundsR, boundsT, boundsB
+    if not fl then
+        return nil
+    end
+
+    boundsL, boundsR, boundsT, boundsB = nil, nil, nil, nil
+    scannedRegions = 0
+    debugSkipped = 0
+    local ok = pcall(CollectArtBounds, owner, 0)
+    if not boundsL then
+        return fl, fr, ft, fb, "frame (art unmeasurable)"
+    end
+
+    local l = math.max(boundsL, fl)
+    local r = math.min(boundsR, fr)
+    local t = math.min(boundsT, ft)
+    local b = math.max(boundsB, fb)
+    if r - l < 1 or t - b < 1 then
+        return fl, fr, ft, fb, "frame (art empty after clamp)"
+    end
+    return l, r, t, b, ok and "art" or "art (scan cut short)"
+end
+
+-- Picks the side facing the middle of the screen. Returns tooltipPoint,
+-- screenX, screenY and the bounds label.
+local function PickElementAnchor(owner)
+    local l, r, t, b, source = GetElementBounds(owner)
+    if not l then
+        return nil
+    end
+    local uiScale = UIParent:GetEffectiveScale()
+    local onRight = (l + r) > GetScreenWidth() * uiScale
+    local onTop = (t + b) > GetScreenHeight() * uiScale
+    if onTop then
+        if onRight then
+            return "TOPRIGHT", l, b, source
+        end
+        return "TOPLEFT", r, b, source
+    end
+    if onRight then
+        return "BOTTOMRIGHT", l, t, source
+    end
+    return "BOTTOMLEFT", r, t, source
+end
+
+-- Last resort if even the owner's rectangle can't be read: anchor to the
+-- owner's (padded) corners.
+local function ApplyRelativeAnchorFallback(tooltip, owner)
+    local x, y = owner:GetCenter()
+    local s = owner:GetEffectiveScale()
+    local uiScale = UIParent:GetEffectiveScale()
+    local onRight = x * s > GetScreenWidth() * uiScale / 2
+    local onTop = y * s > GetScreenHeight() * uiScale / 2
+    local anchorType
+    if onTop then
+        anchorType = onRight and "ANCHOR_BOTTOMLEFT" or "ANCHOR_BOTTOMRIGHT"
+    else
+        anchorType = onRight and "ANCHOR_LEFT" or "ANCHOR_RIGHT"
+    end
+    tooltip:SetAnchorType(anchorType, 0, 0)
+    return anchorType
+end
+
+local cachedOwner, cachedAt, cachedPoint, cachedX, cachedY, cachedSource
+
+local function SyncDebugEnabled()
+    debugEnabled = GetSetting("debugMode") and true or false
+    cachedOwner = nil -- next hover rescans, so the debug line is fresh
+end
+
+-- Positions at an absolute screen point relative to UIParent, so we anchor
+-- to the visible art and GameTooltip is never anchored to a (possibly
+-- protected) unit/action frame. Expects the ANCHOR_NONE ownership Blizzard's
+-- GameTooltip_SetDefaultAnchor just set up.
+local function ApplyElementAnchor(tooltip, owner)
+    local now = GetTime()
+    if owner ~= cachedOwner or now - cachedAt > ELEMENT_CACHE_SECONDS then
+        local ok, point, x, y, source = pcall(PickElementAnchor, owner)
+        if not (ok and point) then
+            cachedOwner = nil
+            local okFallback, result = pcall(ApplyRelativeAnchorFallback, tooltip, owner)
+            if debugEnabled then
+                RecordPlacement(owner, ("element %s: measure failed (%s); %s"):format(
+                    GetFrameLabel(owner), ok and "no bounds" or tostring(point),
+                    okFallback and ("fallback " .. result) or ("fallback failed: " .. tostring(result))))
+            end
+            return
+        end
+        cachedOwner, cachedAt, cachedPoint, cachedX, cachedY, cachedSource = owner, now, point, x, y, source
+    end
+    if debugEnabled then
+        RecordPlacement(owner, ("element %s: %s, bounds from %s%s"):format(
+            GetFrameLabel(owner), cachedPoint, cachedSource,
+            debugSkipped > 0 and (", skipped " .. debugSkipped) or ""))
+    end
+    -- SetPoint offsets are in the tooltip's own (scaled) units.
+    local scale = tooltip:GetEffectiveScale()
+    tooltip:ClearAllPoints()
+    tooltip:SetPoint(cachedPoint, UIParent, "BOTTOMLEFT", cachedX / scale, cachedY / scale)
 end
 
 -- Tracks whether we last positioned this tooltip via the cursor anchor (as
@@ -204,6 +448,20 @@ end
 local function UpdateTooltipPosition(tooltip)
     if not ShouldFollowCursor() then
         RevertToDefaultAnchor(tooltip)
+        if debugEnabled then
+            RecordPlacement(tooltip:GetOwner(), "paused/disabled: Blizzard default")
+        end
+        return
+    end
+    -- HUD tooltips only follow the cursor in "CURSOR" mode. Otherwise
+    -- OnDefaultAnchor already placed them, or Blizzard anchored them on
+    -- purpose (e.g. bag items), so leave them alone.
+    local owner = tooltip:GetOwner()
+    local hudMode = GetSetting("hudAnchorMode")
+    if not IsWorldOwner(owner) and hudMode ~= "CURSOR" then
+        if debugEnabled and hudMode == "DEFAULT" then
+            RecordPlacement(owner, "HUD mode Blizzard default")
+        end
         return
     end
     ApplyCursorAnchor(tooltip)
@@ -218,6 +476,10 @@ local function OnDefaultAnchor(tooltip, parent)
         return
     end
     ApplyScale(tooltip)
+    if GetSetting("hudAnchorMode") == "ELEMENT" and ShouldFollowCursor() and not IsWorldOwner(parent) then
+        ApplyElementAnchor(tooltip, parent)
+        return
+    end
     UpdateTooltipPosition(tooltip)
 end
 
@@ -294,6 +556,26 @@ end
 -- (even over the same unit again later) still gets them.
 local lastInfoKey
 
+-- Debug line, added in the same places as the info lines above (so it's
+-- part of every content rebuild and allowed on unit tooltips). If the last
+-- recorded placement isn't for this tooltip's owner, we didn't move it.
+local debugLineAdded = false
+
+local function AddDebugLine(tooltip, relayout)
+    if not debugEnabled or debugLineAdded or tooltip ~= GameTooltip then
+        return
+    end
+    debugLineAdded = true
+    local text = debugText
+    if not debugOwner or tooltip:GetOwner() ~= debugOwner then
+        text = "not repositioned (Blizzard's own anchor)"
+    end
+    tooltip:AddLine("FMT: " .. text, 1, 0.5, 0.25, true)
+    if relayout then
+        tooltip:Show() -- already shown: re-run layout so the line fits
+    end
+end
+
 local function HandleUnitTooltip(tooltip, unit, guid)
     local key = "unit:" .. tostring(guid or unit)
     if key == lastInfoKey then
@@ -324,6 +606,7 @@ local function HandleUnitTooltip(tooltip, unit, guid)
             tooltip:AddLine("NPC ID: " .. npcId, unpack(INFO_LINE_COLOR))
         end
     end
+    AddDebugLine(tooltip)
 end
 
 local function HandleItemTooltip(tooltip, itemId)
@@ -338,6 +621,7 @@ local function HandleItemTooltip(tooltip, itemId)
     if GetSetting("showItemId") and itemId then
         tooltip:AddLine("Item ID: " .. itemId, unpack(INFO_LINE_COLOR))
     end
+    AddDebugLine(tooltip)
 end
 
 local function HandleSpellTooltip(tooltip, spellId)
@@ -352,11 +636,43 @@ local function HandleSpellTooltip(tooltip, spellId)
     if GetSetting("showSpellId") and spellId then
         tooltip:AddLine("Spell ID: " .. spellId, unpack(INFO_LINE_COLOR))
     end
+    AddDebugLine(tooltip)
 end
 
 RegisterTooltipHook("OnTooltipCleared", function()
     lastInfoKey = nil
     positionedByUs = false
+    debugLineAdded = false
+end)
+
+RegisterTooltipHook("OnHide", function()
+    debugOwner, debugText = nil, nil
+    debugLineAdded = false
+end)
+
+local function HasTooltipData(tooltip)
+    if tooltip.GetPrimaryTooltipData then
+        local ok, data = pcall(tooltip.GetPrimaryTooltipData, tooltip)
+        if ok and data then
+            return true
+        end
+    end
+    if tooltip.GetUnit then
+        local ok, _, unit = pcall(tooltip.GetUnit, tooltip)
+        if ok and unit then
+            return true
+        end
+    end
+    return false
+end
+
+-- Plain tooltips (SetText etc.) never reach a data postcall, so they get
+-- the debug line on show. Data tooltips are never touched from here (unit
+-- tooltips refuse it); their postcall path adds it.
+RegisterTooltipHook("OnShow", function(self)
+    if debugEnabled and not debugLineAdded and not HasTooltipData(self) then
+        AddDebugLine(self, true)
+    end
 end)
 
 if USE_TOOLTIP_DATA_PROCESSOR then
@@ -401,6 +717,21 @@ if USE_TOOLTIP_DATA_PROCESSOR then
         end
         HandleSpellTooltip(tooltip, spellId)
     end)
+
+    -- Debug line for other data types (macros, currencies...); unit/item/
+    -- spell add theirs in Handle* after positioning.
+    if TooltipDataProcessor.AllTypes then
+        local HANDLED = {
+            [Enum.TooltipDataType.Unit] = true,
+            [Enum.TooltipDataType.Item] = true,
+            [Enum.TooltipDataType.Spell] = true,
+        }
+        TooltipDataProcessor.AddTooltipPostCall(TooltipDataProcessor.AllTypes, function(tooltip, data)
+            if debugEnabled and not (data and HANDLED[data.type]) then
+                AddDebugLine(tooltip)
+            end
+        end)
+    end
 else
     -- Legacy fallback for true Classic-Era clients without
     -- TooltipDataProcessor. Each registration is pcall-guarded (see
@@ -442,6 +773,7 @@ end
 -- client build doesn't expose it -- the /fmt slash commands keep working
 -- either way.
 local optionsCategoryID
+local debugSetting -- so /fmt debug can update the panel checkbox
 
 local function CreateOptionsPanel()
     if not (Settings and Settings.RegisterVerticalLayoutCategory and Settings.RegisterAddOnSetting) then
@@ -506,6 +838,11 @@ local function CreateOptionsPanel()
         { value = "CTRL", text = "Ctrl" },
         { value = "ALT", text = "Alt" },
     })
+    AddDropdown("hudAnchorMode", "HUD Element Tooltips", "Where tooltips for UI elements (action bars, unit frames, buffs...) appear. Mobs, players and world objects always follow the cursor.", DEFAULTS.hudAnchorMode, {
+        { value = "ELEMENT", text = "Next to element (like bags)" },
+        { value = "CURSOR", text = "Follow cursor" },
+        { value = "DEFAULT", text = "Blizzard default" },
+    })
     AddDropdown("cursorAnchorSide", "Tooltip Anchor", "Which side of the cursor the tooltip appears on.", DEFAULTS.cursorAnchorSide, {
         { value = "DEFAULT", text = "Default (Can't be offset)" },
         { value = "RIGHT", text = "Bottom Right" },
@@ -528,6 +865,8 @@ local function CreateOptionsPanel()
     AddCheckbox("showItemId", "Show Item ID", "Add the item's numeric ID to item tooltips.", DEFAULTS.showItemId)
     AddCheckbox("showSpellId", "Show Spell ID", "Add the spell's numeric ID to spell tooltips.", DEFAULTS.showSpellId)
     AddCheckbox("showFactionName", "Show Faction", "Add Alliance/Horde faction to unit tooltips, when available.", DEFAULTS.showFactionName)
+    debugSetting = AddCheckbox("debugMode", "Show Placement Debug", "Add a line to every tooltip describing how it was positioned.", DEFAULTS.debugMode)
+    debugSetting:SetValueChangedCallback(SyncDebugEnabled)
 end
 
 -- IMPORTANT: SavedVariables (ForeverMouseTooltipDB) are only loaded by the
@@ -548,6 +887,7 @@ loaderFrame:SetScript("OnEvent", function(self, event, addonName)
     self:UnregisterEvent("ADDON_LOADED")
 
     ForeverMouseTooltipDB = ForeverMouseTooltipDB or {}
+    SyncDebugEnabled()
     CreateOptionsPanel()
 end)
 
@@ -559,7 +899,7 @@ local function OpenOptionsPanel()
     end
 end
 
--- Slash command: /fmt [on|off|offset x y|combat on|off|options]
+-- Slash command: /fmt [on|off|offset x y|combat on|off|hud mode|debug|options]
 -- Only covers the original core settings; the new extra-info and
 -- positioning-refinement options are configured via the options panel only.
 SLASH_FOREVERMOUSETOOLTIP1 = "/fmt"
@@ -594,11 +934,26 @@ SlashCmdList["FOREVERMOUSETOOLTIP"] = function(msg)
         else
             print("|cff33ff99ForeverMouseTooltip|r: usage /fmt combat on|off")
         end
+    elseif cmd == "hud" then
+        local sub = rest:upper()
+        if sub == "ELEMENT" or sub == "CURSOR" or sub == "DEFAULT" then
+            ForeverMouseTooltipDB.hudAnchorMode = sub
+            print("|cff33ff99ForeverMouseTooltip|r: HUD tooltips set to " .. sub:lower() .. ".")
+        else
+            print("|cff33ff99ForeverMouseTooltip|r: usage /fmt hud element|cursor|default")
+        end
+    elseif cmd == "debug" then
+        local newValue = not debugEnabled
+        if debugSetting then
+            debugSetting:SetValue(newValue)
+        else
+            ForeverMouseTooltipDB.debugMode = newValue
+        end
+        SyncDebugEnabled()
+        print("|cff33ff99ForeverMouseTooltip|r: debug " .. (newValue and "on." or "off."))
     elseif cmd == "options" then
         OpenOptionsPanel()
     else
-        print("|cff33ff99ForeverMouseTooltip|r: /fmt on | /fmt off | /fmt offset <x> <y> | /fmt combat on|off | /fmt options")
+        print("|cff33ff99ForeverMouseTooltip|r: /fmt on | /fmt off | /fmt offset <x> <y> | /fmt combat on|off | /fmt hud element|cursor|default | /fmt debug | /fmt options")
     end
 end
-
-
